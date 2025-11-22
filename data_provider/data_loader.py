@@ -9,7 +9,6 @@ from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
 from data_provider.m4 import M4Dataset, M4Meta
 from data_provider.uea import subsample, interpolate_missing, Normalizer
-# from sktime.datasets import load_from_tsfile_to_dataframe
 from sktime.utils.load_data import load_from_tsfile_to_dataframe
 
 import warnings
@@ -19,13 +18,35 @@ warnings.filterwarnings('ignore')
 
 
 class Dataset_ETT_hour(Dataset):
+    '''
+    Dataset class for the ETT (Electricity Transformer Temperature) hourly dataset.
+
+    This dataset handles loading, preprocessing (scaling, time features),
+    and splitting of ETT hourly data for time series forecasting tasks.
+    '''
+
     def __init__(self, args, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
-        if size == None:
+        '''
+        Initializes the ETT hourly dataset.
+
+        Args:
+            args: Configuration arguments (e.g., for data augmentation).
+            root_path (str): Root directory of the dataset.
+            flag (str): Data split type ('train', 'val', 'test').
+            size (list, optional): [seq_len, label_len, pred_len] defining input/output lengths.
+            features (str): Feature type ('M': multivariate, 'S': univariate, 'MS': multivariate to univariate).
+            data_path (str): Name of the data CSV file.
+            target (str): Name of the target column for univariate forecasting.
+            scale (bool): Whether to apply StandardScaler.
+            timeenc (int): Time feature encoding type (0: categorical, 1: numerical).
+            freq (str): Frequency of data ('h' for hourly).
+            seasonal_patterns: Not used for ETT.
+        '''
+        self.args = args # Store args for augmentation
+        # Define sequence lengths
+        if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
             self.pred_len = 24 * 4
@@ -33,7 +54,8 @@ class Dataset_ETT_hour(Dataset):
             self.seq_len = size[0]
             self.label_len = size[1]
             self.pred_len = size[2]
-        # init
+
+        # Initialize
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
@@ -49,49 +71,59 @@ class Dataset_ETT_hour(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
+        '''
+        Reads the data from the CSV file, performs scaling, and extracts time features.
+        '''
         self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path,
-                                          self.data_path))
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
+        # Define data split borders for ETT datasets (fixed sizes)
+        # Train: first 12 months, Validation: next 4 months, Test: last 4 months
         border1s = [0, 12 * 30 * 24 - self.seq_len, 12 * 30 * 24 + 4 * 30 * 24 - self.seq_len]
         border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
+        # Select data columns based on feature type
+        if self.features == 'M' or self.features == 'MS': # Multivariate or Multivariate-to-Univariate
+            cols_data = df_raw.columns[1:] # Exclude 'date' column
             df_data = df_raw[cols_data]
-        elif self.features == 'S':
+        elif self.features == 'S': # Univariate
             df_data = df_raw[[self.target]]
 
+        # Apply StandardScaler to the data
         if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
+            train_data = df_data[border1s[0]:border2s[0]] # Fit scaler only on training data
             self.scaler.fit(train_data.values)
             data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
+        # Extract time features
         df_stamp = df_raw[['date']][border1:border2]
         df_stamp['date'] = pd.to_datetime(df_stamp.date)
-        if self.timeenc == 0:
+        if self.timeenc == 0: # Categorical time features
             df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
             df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
             df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
             df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
-            data_stamp = df_stamp.drop(['date'], 1).values
-        elif self.timeenc == 1:
+            data_stamp = df_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1: # Numerical (Fourier) time features
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0) 
+            data_stamp = data_stamp.transpose(1, 0) # (num_features, num_timestamps) -> (num_timestamps, num_features)
 
         self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-        if self.set_type == 0 and self.args.augmentation_ratio > 0:
-            self.data_x, self.data_y, augmentation_tags = run_augmentation_single(self.data_x, self.data_y, self.args)
-
+        self.data_y = data[border1:border2] # For forecasting, target is often the same as input
         self.data_stamp = data_stamp
 
+        # Apply data augmentation if specified (only for training set)
+        if self.set_type == 0 and self.args.augmentation_ratio > 0:
+            self.data_x, self.data_y, _ = run_augmentation_single(self.data_x, self.data_y, self.args)
+
     def __getitem__(self, index):
+        '''
+        Returns one sample of data.
+        '''
         s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
@@ -105,20 +137,48 @@ class Dataset_ETT_hour(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
+        '''
+        Returns the total number of samples available for a sliding window approach.
+        '''
+        # (Total length of data) - (input sequence length) - (prediction length) + 1
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
+        '''
+        Inverse transforms scaled data back to its original scale.
+        '''
         return self.scaler.inverse_transform(data)
 
 
 class Dataset_ETT_minute(Dataset):
+    '''
+    Dataset class for the ETT (Electricity Transformer Temperature) minute dataset.
+
+    Similar to Dataset_ETT_hour, but specifically configured for minute-level data.
+    '''
+
     def __init__(self, args, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
                  target='OT', scale=True, timeenc=0, freq='t', seasonal_patterns=None):
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
-        if size == None:
+        '''
+        Initializes the ETT minute dataset.
+
+        Args:
+            args: Configuration arguments (e.g., for data augmentation).
+            root_path (str): Root directory of the dataset.
+            flag (str): Data split type ('train', 'val', 'test').
+            size (list, optional): [seq_len, label_len, pred_len] defining input/output lengths.
+            features (str): Feature type ('M': multivariate, 'S': univariate, 'MS': multivariate to univariate).
+            data_path (str): Name of the data CSV file.
+            target (str): Name of the target column for univariate forecasting.
+            scale (bool): Whether to apply StandardScaler.
+            timeenc (int): Time feature encoding type (0: categorical, 1: numerical).
+            freq (str): Frequency of data ('t' for minute).
+            seasonal_patterns: Not used for ETT.
+        '''
+        self.args = args # Store args for augmentation
+        # Define sequence lengths
+        if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
             self.pred_len = 24 * 4
@@ -126,7 +186,8 @@ class Dataset_ETT_minute(Dataset):
             self.seq_len = size[0]
             self.label_len = size[1]
             self.pred_len = size[2]
-        # init
+        
+        # Initialize
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
@@ -142,51 +203,63 @@ class Dataset_ETT_minute(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
+        '''
+        Reads the data from the CSV file, performs scaling, and extracts time features.
+        '''
         self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path,
-                                          self.data_path))
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
+        # Define data split borders for ETT datasets (fixed sizes)
+        # Note: Minute data is much denser, so the borders are multiplied by 4 (for 15-minute intervals)
+        # Train: first 12 months, Validation: next 4 months, Test: last 4 months
         border1s = [0, 12 * 30 * 24 * 4 - self.seq_len, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - self.seq_len]
         border2s = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
+        # Select data columns based on feature type
+        if self.features == 'M' or self.features == 'MS': # Multivariate or Multivariate-to-Univariate
+            cols_data = df_raw.columns[1:] # Exclude 'date' column
             df_data = df_raw[cols_data]
-        elif self.features == 'S':
+        elif self.features == 'S': # Univariate
             df_data = df_raw[[self.target]]
 
+        # Apply StandardScaler to the data
         if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
+            train_data = df_data[border1s[0]:border2s[0]] # Fit scaler only on training data
             self.scaler.fit(train_data.values)
             data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
+        # Extract time features
         df_stamp = df_raw[['date']][border1:border2]
         df_stamp['date'] = pd.to_datetime(df_stamp.date)
-        if self.timeenc == 0:
+        if self.timeenc == 0: # Categorical time features
             df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
             df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
             df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
             df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
             df_stamp['minute'] = df_stamp.date.apply(lambda row: row.minute, 1)
+            # Aggregate minute data into 15-minute intervals
             df_stamp['minute'] = df_stamp.minute.map(lambda x: x // 15)
-            data_stamp = df_stamp.drop(['date'], 1).values
-        elif self.timeenc == 1:
+            data_stamp = df_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1: # Numerical (Fourier) time features
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
+            data_stamp = data_stamp.transpose(1, 0) # (num_features, num_timestamps) -> (num_timestamps, num_features)
 
         self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-        if self.set_type == 0 and self.args.augmentation_ratio > 0:
-            self.data_x, self.data_y, augmentation_tags = run_augmentation_single(self.data_x, self.data_y, self.args)
-
+        self.data_y = data[border1:border2] # For forecasting, target is often the same as input
         self.data_stamp = data_stamp
 
+        # Apply data augmentation if specified (only for training set)
+        if self.set_type == 0 and self.args.augmentation_ratio > 0:
+            self.data_x, self.data_y, _ = run_augmentation_single(self.data_x, self.data_y, self.args)
+
     def __getitem__(self, index):
+        '''
+        Returns one sample of data.
+        '''
         s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
@@ -200,20 +273,49 @@ class Dataset_ETT_minute(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
+        '''
+        Returns the total number of samples available for a sliding window approach.
+        '''
+        # (Total length of data) - (input sequence length) - (prediction length) + 1
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
+        '''
+        Inverse transforms scaled data back to its original scale.
+        '''
         return self.scaler.inverse_transform(data)
 
 
 class Dataset_Custom(Dataset):
+    '''
+    Generic Dataset class for custom time series data.
+
+    This class handles loading, preprocessing, and splitting of custom CSV data
+    for time series forecasting tasks. Data split ratios are dynamic (70/10/20).
+    '''
+
     def __init__(self, args, root_path, flag='train', size=None,
-                 features='S', data_path='ETTh1.csv',
+                 features='S', data_path='custom.csv',
                  target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
-        if size == None:
+        '''
+        Initializes the custom dataset.
+
+        Args:
+            args: Configuration arguments (e.g., for data augmentation).
+            root_path (str): Root directory of the dataset.
+            flag (str): Data split type ('train', 'val', 'test').
+            size (list, optional): [seq_len, label_len, pred_len] defining input/output lengths.
+            features (str): Feature type ('M': multivariate, 'S': univariate, 'MS': multivariate to univariate).
+            data_path (str): Name of the data CSV file.
+            target (str): Name of the target column for univariate forecasting.
+            scale (bool): Whether to apply StandardScaler.
+            timeenc (int): Time feature encoding type (0: categorical, 1: numerical).
+            freq (str): Frequency of data ('h' for hourly).
+            seasonal_patterns: Not used for custom datasets.
+        '''
+        self.args = args # Store args for augmentation
+        # Define sequence lengths
+        if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
             self.pred_len = 24 * 4
@@ -221,7 +323,8 @@ class Dataset_Custom(Dataset):
             self.seq_len = size[0]
             self.label_len = size[1]
             self.pred_len = size[2]
-        # init
+        
+        # Initialize
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
@@ -237,59 +340,69 @@ class Dataset_Custom(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
+        '''
+        Reads the data from the CSV file, performs scaling, extracts time features,
+        and dynamically splits data into train/validation/test sets.
+        '''
         self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path,
-                                          self.data_path))
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
-        '''
-        df_raw.columns: ['date', ...(other features), target feature]
-        '''
+        # Reorder columns: 'date', other features, then target feature
         cols = list(df_raw.columns)
         cols.remove(self.target)
         cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
+        df_raw = df_raw(['date'] + cols + [self.target])
+
+        # Dynamic data splitting (70% train, 20% test, 10% validation)
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
         num_vali = len(df_raw) - num_train - num_test
+        
         border1s = [0, num_train - self.seq_len, len(df_raw) - num_test - self.seq_len]
         border2s = [num_train, num_train + num_vali, len(df_raw)]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
+        # Select data columns based on feature type
+        if self.features == 'M' or self.features == 'MS': # Multivariate or Multivariate-to-Univariate
+            cols_data = df_raw.columns[1:] # Exclude 'date' column
             df_data = df_raw[cols_data]
-        elif self.features == 'S':
+        elif self.features == 'S': # Univariate
             df_data = df_raw[[self.target]]
 
+        # Apply StandardScaler to the data
         if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
+            train_data = df_data[border1s[0]:border2s[0]] # Fit scaler only on training data
             self.scaler.fit(train_data.values)
             data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
+        # Extract time features
         df_stamp = df_raw[['date']][border1:border2]
         df_stamp['date'] = pd.to_datetime(df_stamp.date)
-        if self.timeenc == 0:
+        if self.timeenc == 0: # Categorical time features
             df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
             df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
             df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
             df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
-            data_stamp = df_stamp.drop(['date'], 1).values
-        elif self.timeenc == 1:
+            data_stamp = df_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1: # Numerical (Fourier) time features
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
+            data_stamp = data_stamp.transpose(1, 0) # (num_features, num_timestamps) -> (num_timestamps, num_features)
 
         self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-        if self.set_type == 0 and self.args.augmentation_ratio > 0:
-            self.data_x, self.data_y, augmentation_tags = run_augmentation_single(self.data_x, self.data_y, self.args)
-
+        self.data_y = data[border1:border2] # For forecasting, target is often the same as input
         self.data_stamp = data_stamp
 
+        # Apply data augmentation if specified (only for training set)
+        if self.set_type == 0 and self.args.augmentation_ratio > 0:
+            self.data_x, self.data_y, _ = run_augmentation_single(self.data_x, self.data_y, self.args)
+
     def __getitem__(self, index):
+        '''
+        Returns one sample of data.
+        '''
         s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
@@ -303,31 +416,62 @@ class Dataset_Custom(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
+        '''
+        Returns the total number of samples available for a sliding window approach.
+        '''
+        # (Total length of data) - (input sequence length) - (prediction length) + 1
         return len(self.data_x) - self.seq_len - self.pred_len + 1
 
     def inverse_transform(self, data):
+        '''
+        Inverse transforms scaled data back to its original scale.
+        '''
         return self.scaler.inverse_transform(data)
 
 
 class Dataset_M4(Dataset):
+    '''
+    Dataset class for the M4 competition dataset.
+
+    This class handles loading and preparing M4 time series, which have varying
+    lengths and specific train/test splits. It's tailored for short-term forecasting.
+    '''
+
     def __init__(self, args, root_path, flag='pred', size=None,
-                 features='S', data_path='ETTh1.csv',
+                 features='S', data_path='ETTh1.csv', # data_path not directly used by M4
                  target='OT', scale=False, inverse=False, timeenc=0, freq='15min',
                  seasonal_patterns='Yearly'):
-        # size [seq_len, label_len, pred_len]
-        # init
+        '''
+        Initializes the M4 dataset.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Directory containing M4 dataset files.
+            flag (str): Data split type ('train', 'pred'). 'pred' is used for test/evaluation here.
+            size (list, optional): [seq_len, label_len, pred_len] defining input/output lengths.
+            features (str): Feature type ('S' for univariate M4).
+            data_path (str): Not directly used by M4 dataset class.
+            target (str): Not directly used by M4 dataset class.
+            scale (bool): Whether to apply StandardScaler (False by default for M4).
+            inverse (bool): Whether to perform inverse transform (False by default).
+            timeenc (int): Time feature encoding type (0: categorical, 1: numerical).
+            freq (str): Frequency of data (e.g., '15min').
+            seasonal_patterns (str): M4 specific seasonal pattern ('Yearly', 'Monthly', etc.).
+        '''
         self.features = features
         self.target = target
-        self.scale = scale
+        self.scale = scale # M4 often handled without external scaling
         self.inverse = inverse
         self.timeenc = timeenc
         self.root_path = root_path
 
+        # Define sequence lengths based on model config
         self.seq_len = size[0]
         self.label_len = size[1]
         self.pred_len = size[2]
 
         self.seasonal_patterns = seasonal_patterns
+        # M4 specific: history size and window sampling limit based on seasonal pattern
         self.history_size = M4Meta.history_size[seasonal_patterns]
         self.window_sampling_limit = int(self.history_size * self.pred_len)
         self.flag = flag
@@ -335,167 +479,289 @@ class Dataset_M4(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        # M4Dataset.initialize()
+        '''
+        Loads M4 time series data, filtering by seasonal pattern.
+        '''
+        # M4Dataset.initialize() # If external initialization is needed
         if self.flag == 'train':
             dataset = M4Dataset.load(training=True, dataset_file=self.root_path)
-        else:
+        else: # 'pred' flag usually corresponds to test/inference
             dataset = M4Dataset.load(training=False, dataset_file=self.root_path)
+        
+        # Filter time series based on the specified seasonal pattern
         training_values = [v[~np.isnan(v)] for v in
-             dataset.values[dataset.groups == self.seasonal_patterns]]  # split different frequencies
+             dataset.values[dataset.groups == self.seasonal_patterns]]
         self.ids = np.array([i for i in dataset.ids[dataset.groups == self.seasonal_patterns]])
         self.timeseries = [ts for ts in training_values]
 
     def __getitem__(self, index):
+        '''
+        Returns one sample of data from the M4 dataset, typically involving random window sampling.
+        '''
+        # Initialize arrays for input, output, and masks
         insample = np.zeros((self.seq_len, 1))
         insample_mask = np.zeros((self.seq_len, 1))
         outsample = np.zeros((self.pred_len + self.label_len, 1))
         outsample_mask = np.zeros((self.pred_len + self.label_len, 1))  # m4 dataset
 
         sampled_timeseries = self.timeseries[index]
+        
+        # Randomly select a cut point within the time series for window sampling
         cut_point = np.random.randint(low=max(1, len(sampled_timeseries) - self.window_sampling_limit),
                                       high=len(sampled_timeseries),
                                       size=1)[0]
 
+        # Extract insample window
         insample_window = sampled_timeseries[max(0, cut_point - self.seq_len):cut_point]
         insample[-len(insample_window):, 0] = insample_window
-        insample_mask[-len(insample_window):, 0] = 1.0
+        insample_mask[-len(insample_window):, 0] = 1.0 # Mask indicates valid data points
+
+        # Extract outsample window (ground truth for prediction and label)
         outsample_window = sampled_timeseries[
                            max(0, cut_point - self.label_len):min(len(sampled_timeseries), cut_point + self.pred_len)]
         outsample[:len(outsample_window), 0] = outsample_window
-        outsample_mask[:len(outsample_window), 0] = 1.0
+        outsample_mask[:len(outsample_window), 0] = 1.0 # Mask indicates valid data points
+
+        # Return insample (seq_x), outsample (seq_y), and their masks (used as x_mark, y_mark)
         return insample, outsample, insample_mask, outsample_mask
 
     def __len__(self):
+        '''
+        Returns the total number of individual time series in the dataset.
+        '''
         return len(self.timeseries)
 
     def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
+        '''
+        Inverse transforms scaled data back to its original scale.
+        (Note: M4 is typically unscaled, so this might not be used or implemented here.)
+        '''
+        # M4 datasets are often not scaled using StandardScaler; if used, scaler would need to be defined
+        # For current M4 implementation, `scale=False` by default, so this might lead to error if called.
+        raise NotImplementedError("Inverse transform is not typically implemented for M4 data in this setup.")
 
     def last_insample_window(self):
-        """
-        The last window of insample size of all timeseries.
-        This function does not support batching and does not reshuffle timeseries.
-
-        :return: Last insample window of all timeseries. Shape "timeseries, insample size"
-        """
+        '''
+        Retrieves the last in-sample window for all time series.
+        This function is used during evaluation to provide the model with the most
+        recent historical data for forecasting.
+        '''
         insample = np.zeros((len(self.timeseries), self.seq_len))
         insample_mask = np.zeros((len(self.timeseries), self.seq_len))
         for i, ts in enumerate(self.timeseries):
             ts_last_window = ts[-self.seq_len:]
-            insample[i, -len(ts):] = ts_last_window
-            insample_mask[i, -len(ts):] = 1.0
+            insample[i, -len(ts_last_window):] = ts_last_window # Fill from the end
+            insample_mask[i, -len(ts_last_window):] = 1.0
         return insample, insample_mask
 
 
 class PSMSegLoader(Dataset):
+    '''
+    Dataset loader for the PSM (Process Search Monitor) dataset, typically used for anomaly detection.
+
+    This class prepares segmented windows of data and their corresponding labels.
+    '''
+
     def __init__(self, args, root_path, win_size, step=1, flag="train"):
+        '''
+        Initializes the PSM segment loader.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Root directory containing 'train.csv', 'test.csv', 'test_label.csv'.
+            win_size (int): Size of the sliding window for segments.
+            step (int): Stride for the sliding window.
+            flag (str): Data split type ("train", "val", "test").
+        '''
         self.flag = flag
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
+
+        # Load and preprocess training data
         data = pd.read_csv(os.path.join(root_path, 'train.csv'))
-        data = data.values[:, 1:]
-        data = np.nan_to_num(data)
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
+        data = data.values[:, 1:] # Exclude timestamp column
+        data = np.nan_to_num(data) # Handle potential NaN values
+        self.scaler.fit(data) # Fit scaler on training data
+        self.train = self.scaler.transform(data)
+
+        # Load and preprocess test data
         test_data = pd.read_csv(os.path.join(root_path, 'test.csv'))
-        test_data = test_data.values[:, 1:]
+        test_data = test_data.values[:, 1:] # Exclude timestamp column
         test_data = np.nan_to_num(test_data)
         self.test = self.scaler.transform(test_data)
-        self.train = data
+
+        # Split training data to create a validation set
         data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.val = self.train[int(data_len * 0.8):]
+        
+        # Load test labels
         self.test_labels = pd.read_csv(os.path.join(root_path, 'test_label.csv')).values[:, 1:]
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
+        
+        print(f"PSMSegLoader - Train shape: {self.train.shape}, Test shape: {self.test.shape}")
 
     def __len__(self):
+        '''
+        Returns the total number of segments available for a sliding window approach.
+        '''
         if self.flag == "train":
             return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'val'):
+        elif self.flag == 'val':
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif self.flag == 'test':
             return (self.test.shape[0] - self.win_size) // self.step + 1
-        else:
-            return (self.test.shape[0] - self.win_size) // self.win_size + 1
+        else: # For custom flags, e.g., 'inference' if different step logic is needed
+            return (self.test.shape[0] - self.win_size) // self.win_size + 1 # Use win_size as step for full coverage
 
     def __getitem__(self, index):
-        index = index * self.step
+        '''
+        Returns one data segment and its corresponding label.
+        '''
+        index = index * self.step # Calculate start index of the segment
+        
+        # Extract data segment based on flag
         if self.flag == "train":
+            # Note: test_labels are used for training data labels, likely for a specific AD setup.
+            # This means the training labels are fixed to the first `win_size` of test_labels.
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'val'):
+        elif self.flag == 'val':
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif self.flag == 'test':
+            # For testing, labels correspond to the current segment
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
+            # Special case: segment extraction for other flags, e.g., using win_size as step
+            start_idx = (index // self.step) * self.win_size
             return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
+                              start_idx:start_idx + self.win_size]), np.float32(
+                self.test_labels[start_idx:start_idx + self.win_size])
 
 
 class MSLSegLoader(Dataset):
+    '''
+    Dataset loader for the MSL (Mars Science Laboratory) dataset, typically used for anomaly detection.
+
+    Similar structure to PSMSegLoader, but loads data from .npy files.
+    '''
+
     def __init__(self, args, root_path, win_size, step=1, flag="train"):
+        '''
+        Initializes the MSL segment loader.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Root directory containing 'MSL_train.npy', 'MSL_test.npy', 'MSL_test_label.npy'.
+            win_size (int): Size of the sliding window for segments.
+            step (int): Stride for the sliding window.
+            flag (str): Data split type ("train", "val", "test").
+        '''
         self.flag = flag
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
+
+        # Load and preprocess training data
         data = np.load(os.path.join(root_path, "MSL_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
+        self.scaler.fit(data) # Fit scaler on training data
+        self.train = self.scaler.transform(data)
+
+        # Load and preprocess test data
         test_data = np.load(os.path.join(root_path, "MSL_test.npy"))
         self.test = self.scaler.transform(test_data)
-        self.train = data
+
+        # Split training data to create a validation set
         data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.val = self.train[int(data_len * 0.8):]
+        
+        # Load test labels
         self.test_labels = np.load(os.path.join(root_path, "MSL_test_label.npy"))
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
+        
+        print(f"MSLSegLoader - Train shape: {self.train.shape}, Test shape: {self.test.shape}")
 
     def __len__(self):
+        '''
+        Returns the total number of segments available for a sliding window approach.
+        '''
         if self.flag == "train":
             return (self.train.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'val'):
+        elif self.flag == 'val':
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif self.flag == 'test':
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
-        index = index * self.step
+        '''
+        Returns one data segment and its corresponding label.
+        '''
+        index = index * self.step # Calculate start index of the segment
+        
+        # Extract data segment based on flag
         if self.flag == "train":
+            # Note: test_labels are used for training data labels, likely for a specific AD setup.
+            # This means the training labels are fixed to the first `win_size` of test_labels.
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'val'):
+        elif self.flag == 'val':
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif self.flag == 'test':
+            # For testing, labels correspond to the current segment
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
+            # Special case: segment extraction for other flags, e.g., using win_size as step
+            start_idx = (index // self.step) * self.win_size
             return np.float32(self.test[
-                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
-                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
+                              start_idx:start_idx + self.win_size]), np.float32(
+                self.test_labels[start_idx:start_idx + self.win_size])
 
 
 class SMAPSegLoader(Dataset):
+    '''
+    Dataset loader for the SMAP (Soil Moisture Active Passive) dataset, typically used for anomaly detection.
+
+    Similar structure to PSMSegLoader, but loads data from .npy files.
+    '''
+
     def __init__(self, args, root_path, win_size, step=1, flag="train"):
+        '''
+        Initializes the SMAP segment loader.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Root directory containing 'SMAP_train.npy', 'SMAP_test.npy', 'SMAP_test_label.npy'.
+            win_size (int): Size of the sliding window for segments.
+            step (int): Stride for the sliding window.
+            flag (str): Data split type ("train", "val", "test").
+        '''
         self.flag = flag
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
+
+        # Load and preprocess training data
         data = np.load(os.path.join(root_path, "SMAP_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
+        self.scaler.fit(data) # Fit scaler on training data
+        self.train = self.scaler.transform(data)
+
+        # Load and preprocess test data
         test_data = np.load(os.path.join(root_path, "SMAP_test.npy"))
         self.test = self.scaler.transform(test_data)
-        self.train = data
+
+        # Split training data to create a validation set
         data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.val = self.train[int(data_len * 0.8):]
+        
+        # Load test labels
         self.test_labels = np.load(os.path.join(root_path, "SMAP_test_label.npy"))
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
+        
+        print(f"SMAPSegLoader - Train shape: {self.train.shape}, Test shape: {self.test.shape}")
 
     def __len__(self):
+        '''
+        Returns the total number of segments available for a sliding window approach.
+        '''
 
         if self.flag == "train":
             return (self.train.shape[0] - self.win_size) // self.step + 1
@@ -507,6 +773,9 @@ class SMAPSegLoader(Dataset):
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
+        '''
+        Returns one data segment and its corresponding label.
+        '''
         index = index * self.step
         if self.flag == "train":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
@@ -522,22 +791,48 @@ class SMAPSegLoader(Dataset):
 
 
 class SMDSegLoader(Dataset):
+    '''
+    Dataset loader for the SMD (Server Machine Dataset) dataset, typically used for anomaly detection.
+
+    Similar structure to PSMSegLoader, but loads data from .npy files and has a different default step.
+    '''
+
     def __init__(self, args, root_path, win_size, step=100, flag="train"):
+        '''
+        Initializes the SMD segment loader.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Root directory containing 'SMD_train.npy', 'SMD_test.npy', 'SMD_test_label.npy'.
+            win_size (int): Size of the sliding window for segments.
+            step (int): Stride for the sliding window (default 100 for SMD).
+            flag (str): Data split type ("train", "val", "test").
+        '''
         self.flag = flag
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
+
+        # Load and preprocess training data
         data = np.load(os.path.join(root_path, "SMD_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
+        self.scaler.fit(data) # Fit scaler on training data
+        self.train = self.scaler.transform(data)
+
+        # Load and preprocess test data
         test_data = np.load(os.path.join(root_path, "SMD_test.npy"))
         self.test = self.scaler.transform(test_data)
-        self.train = data
+
+        # Split training data to create a validation set
         data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.val = self.train[int(data_len * 0.8):]
+        
+        # Load test labels
         self.test_labels = np.load(os.path.join(root_path, "SMD_test_label.npy"))
 
     def __len__(self):
+        '''
+        Returns the total number of segments available for a sliding window approach.
+        '''
         if self.flag == "train":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
@@ -548,6 +843,9 @@ class SMDSegLoader(Dataset):
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
+        '''
+        Returns one data segment and its corresponding label.
+        '''
         index = index * self.step
         if self.flag == "train":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
@@ -563,33 +861,54 @@ class SMDSegLoader(Dataset):
 
 
 class SWATSegLoader(Dataset):
+    '''
+    Dataset loader for the SWAT (Secure Water Treatment) dataset, typically used for anomaly detection.
+
+    Similar structure to PSMSegLoader, but loads data from CSV files and preprocesses labels.
+    '''
+
     def __init__(self, args, root_path, win_size, step=1, flag="train"):
+        '''
+        Initializes the SWAT segment loader.
+
+        Args:
+            args: Configuration arguments.
+            root_path (str): Root directory containing 'swat_train2.csv', 'swat2.csv'.
+            win_size (int): Size of the sliding window for segments.
+            step (int): Stride for the sliding window.
+            flag (str): Data split type ("train", "val", "test").
+        '''
         self.flag = flag
         self.step = step
         self.win_size = win_size
         self.scaler = StandardScaler()
 
-        train_data = pd.read_csv(os.path.join(root_path, 'swat_train2.csv'))
-        test_data = pd.read_csv(os.path.join(root_path, 'swat2.csv'))
-        labels = test_data.values[:, -1:]
-        train_data = train_data.values[:, :-1]
-        test_data = test_data.values[:, :-1]
+        # Load and preprocess training data
+        train_data_df = pd.read_csv(os.path.join(root_path, 'swat_train2.csv'))
+        train_data = train_data_df.values[:, :-1] # Exclude potential last column if it's not a feature
+        
+        # Load test data and labels
+        test_data_df = pd.read_csv(os.path.join(root_path, 'swat2.csv'))
+        labels = test_data_df.values[:, -1:] # Last column assumed to be labels
+        test_data = test_data_df.values[:, :-1] # Exclude labels from features
 
         self.scaler.fit(train_data)
-        train_data = self.scaler.transform(train_data)
-        test_data = self.scaler.transform(test_data)
-        self.train = train_data
-        self.test = test_data
+        self.train = self.scaler.transform(train_data)
+        self.test = self.scaler.transform(test_data)
+
+        # Split training data to create a validation set
         data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.val = self.train[int(data_len * 0.8):]
+        
+        # Store test labels
         self.test_labels = labels
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
+        
+        print(f"SWATSegLoader - Train shape: {self.train.shape}, Test shape: {self.test.shape}")
 
     def __len__(self):
-        """
+        '''
         Number of images in the object dataset.
-        """
+        '''
         if self.flag == "train":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
@@ -600,6 +919,9 @@ class SWATSegLoader(Dataset):
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
+        '''
+        Returns one data segment and its corresponding label.
+        '''
         index = index * self.step
         if self.flag == "train":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
@@ -615,7 +937,7 @@ class SWATSegLoader(Dataset):
 
 
 class UEAloader(Dataset):
-    """
+    '''
     Dataset class for datasets included in:
         Time Series Classification Archive (www.timeseriesclassification.com)
     Argument:
@@ -629,7 +951,7 @@ class UEAloader(Dataset):
         labels_df: (num_samples, num_labels) pd.DataFrame of label(s) for each sample
         max_seq_len: maximum sequence (time series) length. If None, script argument `max_seq_len` will be used.
             (Moreover, script argument overrides this attribute)
-    """
+    '''
 
     def __init__(self, args, root_path, file_list=None, limit_size=None, flag=None):
         self.args = args
@@ -656,7 +978,7 @@ class UEAloader(Dataset):
         print(len(self.all_IDs))
 
     def load_all(self, root_path, file_list=None, flag=None):
-        """
+        '''
         Loads datasets from ts files contained in `root_path` into a dataframe, optionally choosing from `pattern`
         Args:
             root_path: directory containing all individual .ts files
@@ -665,7 +987,7 @@ class UEAloader(Dataset):
         Returns:
             all_df: a single (possibly concatenated) dataframe with all data corresponding to specified files
             labels_df: dataframe containing label(s) for each sample
-        """
+        '''
         # Select paths for training and evaluation
         if file_list is None:
             data_paths = glob.glob(os.path.join(root_path, '*'))  # list of all paths
@@ -810,7 +1132,7 @@ class Dataset_PEMS(Dataset):
         # 获取当前数据集划分
         current_data_split = full_data[border1:border2]
 
-        # --- 3. 选择性缩放 (Selective Scaling) ---
+        # --- 3. 数据集划分 ---
         self.scaler = StandardScaler()
         if self.scale:
             # a. 从训练集中提取 'value' 特征来拟合 scaler

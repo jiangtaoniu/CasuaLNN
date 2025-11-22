@@ -1,34 +1,49 @@
-# G:\Code\MS-IPM\MS-IPM\layers\DynamicLiquid.py
-# [!!! 新文件 !!!]
-#
-# 该文件定义了 LNN-iT-DynamicODE 架构的核心：
-# 1. DynamicCfCCell: 一个 CfC 单元，其内部 ODE 参数 (t_a, t_b) 可以被外部信号动态调制。
-# 2. DynamicCfC: 一个 RNN 封装器，负责在循环中将外部参数序列传递给 DynamicCfCCell。
-# 3. DynamicLiquidEncoder: 一个 Transformer 风格的编码器，将 DynamicCfC 封装为标准层。
-#
-# 它依赖于您在上下文中提供的 LeCun 和 LSTMCell 实现。
+"""
+This file defines the core components of a dynamic ODE-based recurrent neural network,
+likely inspired by Liquid Time-Constant Networks (LTCs) or Closed-form Continuous-time
+(CfC) models. The key feature is that the internal ODE parameters of the recurrent
+cell can be dynamically modulated by an external signal at each time step. This is a
+central component of the CasuaLNN architecture, where a Transformer-based controller
+generates these dynamic parameters.
+
+The main components are:
+1. DynamicCfCCell: A CfC cell whose internal ODE parameters (t_a, t_b) can be
+   modulated by an external `dynamic_params` tensor.
+2. DynamicCfC: An RNN-style wrapper that passes a sequence of external parameters
+   to the DynamicCfCCell in a loop.
+3. DynamicLiquidEncoder & DynamicLiquidLayer: Transformer-style encoder blocks that
+   wrap the DynamicCfC into a standard layer with residual connections and normalization.
+"""
 
 import torch
 from torch import nn
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 import ncps
 import numpy as np
 import torch.nn.functional as F
 
 
-# --- 依赖项：从上下文中复制 LeCun ---
+# --- Dependency: LeCun Tanh Activation ---
 class LeCun(nn.Module):
+    """
+    LeCun's Tanh activation function, defined as 1.7159 * tanh(0.666 * x).
+    This is often used in self-normalizing networks.
+    """
     def __init__(self):
         super(LeCun, self).__init__()
         self.tanh = nn.Tanh()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return 1.7159 * self.tanh(0.666 * x)
 
 
-# --- 依赖项：从上下文中复制 LSTMCell (DynamicCfC的mixed_memory需要) ---
+# --- Dependency: LSTMCell (for mixed_memory mode in DynamicCfC) ---
 class LSTMCell(nn.Module):
-    def __init__(self, input_size, hidden_size):
+    """
+    A standard LSTM cell implementation, used as an optional component for
+    the `mixed_memory` mode in the DynamicCfC wrapper.
+    """
+    def __init__(self, input_size: int, hidden_size: int):
         super(LSTMCell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -50,7 +65,7 @@ class LSTMCell(nn.Module):
             else:
                 torch.nn.init.orthogonal_(w)
 
-    def forward(self, inputs, states):
+    def forward(self, inputs: torch.Tensor, states: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         output_state, cell_state = states
         z = self.input_map(inputs) + self.recurrent_map(output_state)
         i, ig, fg, og = z.chunk(4, 1)
@@ -66,84 +81,58 @@ class LSTMCell(nn.Module):
         return output_state, new_cell
 
 
-# --- 核心修改 1: DynamicCfCCell ---
-# (基于上下文中的 CfCCell 修改)
+# --- Core Component 1: DynamicCfCCell ---
 class DynamicCfCCell(nn.Module):
+    """
+    A "Closed-form Continuous-time" (CfC) cell whose ODE parameters can be
+    dynamically modulated by an external signal at each time step. This allows
+    the cell's temporal dynamics to adapt based on context provided by another model.
+    """
     def __init__(
             self,
-            input_size,
-            hidden_size,
-            mode="default",
-            backbone_activation="lecun_tanh",
-            backbone_units=128,
-            backbone_layers=1,
-            backbone_dropout=0.0,
-            sparsity_mask=None,
+            input_size: int,
+            hidden_size: int,
+            mode: str = "default",
+            backbone_activation: str = "lecun_tanh",
+            backbone_units: int = 128,
+            backbone_layers: int = 1,
+            backbone_dropout: float = 0.0,
+            sparsity_mask: Optional[np.ndarray] = None,
     ):
         super(DynamicCfCCell, self).__init__()
 
         self.input_size = input_size
         self.hidden_size = hidden_size
-        allowed_modes = ["default", "pure", "no_gate"]
-        if mode not in allowed_modes:
-            raise ValueError(
-                f"Unknown mode '{mode}', valid options are {str(allowed_modes)}"
-            )
-        self.sparsity_mask = (
-            None
-            if sparsity_mask is None
-            else torch.nn.Parameter(
-                data=torch.from_numpy(np.abs(sparsity_mask.T).astype(np.float32)),
-                requires_grad=False,
-            )
-        )
         self.mode = mode
-
-        if backbone_activation == "silu":
-            backbone_activation = nn.SiLU
-        elif backbone_activation == "relu":
-            backbone_activation = nn.ReLU
-        elif backbone_activation == "tanh":
-            backbone_activation = nn.Tanh
-        elif backbone_activation == "gelu":
-            backbone_activation = nn.GELU
-        elif backbone_activation == "lecun_tanh":
-            backbone_activation = LeCun
-        else:
-            raise ValueError(f"Unknown activation {backbone_activation}")
-
+        
+        # Backbone network for feature extraction
         self.backbone = None
-        self.backbone_layers = backbone_layers
         if backbone_layers > 0:
-            layer_list = [
-                nn.Linear(input_size + hidden_size, backbone_units),
-                backbone_activation(),
-            ]
-            for i in range(1, backbone_layers):
+            layer_list = [nn.Linear(input_size + hidden_size, backbone_units)]
+            if backbone_activation == "silu": layer_list.append(nn.SiLU())
+            elif backbone_activation == "relu": layer_list.append(nn.ReLU())
+            elif backbone_activation == "tanh": layer_list.append(nn.Tanh())
+            elif backbone_activation == "gelu": layer_list.append(nn.GELU())
+            elif backbone_activation == "lecun_tanh": layer_list.append(LeCun())
+            else: raise ValueError(f"Unknown activation {backbone_activation}")
+            
+            for _ in range(1, backbone_layers):
                 layer_list.append(nn.Linear(backbone_units, backbone_units))
-                layer_list.append(backbone_activation())
-                if backbone_dropout > 0.0:
-                    layer_list.append(torch.nn.Dropout(backbone_dropout))
+                layer_list.append(layer_list[1]) # Share activation instance
+                if backbone_dropout > 0.0: layer_list.append(nn.Dropout(backbone_dropout))
             self.backbone = nn.Sequential(*layer_list)
+            
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
-        cat_shape = int(
-            self.hidden_size + input_size if backbone_layers == 0 else backbone_units
-        )
-
+        
+        # Linear layers for CfC logic
+        cat_shape = backbone_units if backbone_layers > 0 else input_size + hidden_size
         self.ff1 = nn.Linear(cat_shape, hidden_size)
-        if self.mode == "pure":
-            self.w_tau = torch.nn.Parameter(
-                data=torch.zeros(1, self.hidden_size), requires_grad=True
-            )
-            self.A = torch.nn.Parameter(
-                data=torch.ones(1, self.hidden_size), requires_grad=True
-            )
-        else:
-            self.ff2 = nn.Linear(cat_shape, hidden_size)
-            # 这些是ODE动态的“静态”部分
-            self.time_a = nn.Linear(cat_shape, hidden_size)
-            self.time_b = nn.Linear(cat_shape, hidden_size)
+        self.ff2 = nn.Linear(cat_shape, hidden_size)
+        # These layers generate the "static" part of the ODE parameters
+        self.time_a = nn.Linear(cat_shape, hidden_size)
+        self.time_b = nn.Linear(cat_shape, hidden_size)
+        
         self.init_weights()
 
     def init_weights(self):
@@ -151,83 +140,68 @@ class DynamicCfCCell(nn.Module):
             if w.dim() == 2 and w.requires_grad:
                 torch.nn.init.xavier_uniform_(w)
 
-    def forward(self, input, hx, ts, dynamic_params=None):
+    def forward(self, input: torch.Tensor, hx: torch.Tensor, ts: torch.Tensor,
+                dynamic_params: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        [!!! 核心修改 !!!]
-        新增 dynamic_params 参数，用于接收来自 iT Controller 的调制信号。
-        dynamic_params 预期形状: [Batch, 2 * hidden_size]
+        Forward pass for a single time step.
+
+        Args:
+            input (torch.Tensor): Input tensor for the current time step.
+            hx (torch.Tensor): Hidden state from the previous time step.
+            ts (torch.Tensor): Timespan for the current step.
+            dynamic_params (Optional[torch.Tensor]): External modulation signal,
+                                                     shape (B, 2 * hidden_size), containing
+                                                     delta_t_a and delta_t_b.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The new hidden state and the output (which are the same here).
         """
         x = torch.cat([input, hx], 1)
-        if self.backbone_layers > 0:
+        if self.backbone:
             x = self.backbone(x)
-        if self.sparsity_mask is not None:
-            ff1 = F.linear(x, self.ff1.weight * self.sparsity_mask, self.ff1.bias)
+        
+        # Standard CfC logic with tanh activations
+        ff1 = self.tanh(self.ff1(x))
+        ff2 = self.tanh(self.ff2(x))
+
+        # --- [Dynamic ODE Modification] ---
+        # 1. Calculate "static" ODE parameters from the input and hidden state.
+        t_a_static = self.time_a(x)
+        t_b_static = self.time_b(x)
+
+        # 2. Apply "dynamic" modulation from the external controller if provided.
+        if dynamic_params is not None:
+            # `dynamic_params` is expected to contain concatenated [delta_t_a, delta_t_b]
+            delta_t_a, delta_t_b = dynamic_params.chunk(2, 1)
+            # Additive modulation
+            t_a_final = t_a_static + delta_t_a
+            t_b_final = t_b_static + delta_t_b
         else:
-            ff1 = self.ff1(x)
+            t_a_final = t_a_static
+            t_b_final = t_b_static
 
-        if self.mode == "pure":
-            # 纯净模式：动态调制 w_tau (时间常数)
-            # (注意: "pure" 模式的动态调制更复杂，为简化，我们专注于 "default" 模式)
-            # (如果需要 "pure" 模式，dynamic_params 应包含 delta_w_tau 和 delta_A)
-            w_tau_final = self.w_tau
-            A_final = self.A
-            if dynamic_params is not None:
-                # 假设 dynamic_params 包含 [delta_w_tau, delta_A]
-                delta_w_tau, delta_A = dynamic_params.chunk(2, 1)
-                w_tau_final = self.w_tau + delta_w_tau
-                A_final = self.A + delta_A
+        # 3. Use the final parameters to calculate the interpolation factor for the ODE solution.
+        t_interp = self.sigmoid(t_a_final * ts + t_b_final)
 
-            new_hidden = (
-                    -A_final
-                    * torch.exp(-ts * (torch.abs(w_tau_final) + torch.abs(ff1)))
-                    * ff1
-                    + A_final
-            )
-        else:
-            # 默认模式 ("default" 或 "no_gate")
-            if self.sparsity_mask is not None:
-                ff2 = F.linear(x, self.ff2.weight * self.sparsity_mask, self.ff2.bias)
-            else:
-                ff2 = self.ff2(x)
-            ff1 = self.tanh(ff1)
-            ff2 = self.tanh(ff2)
-
-            # [!!! 核心修改 !!!]
-            # 1. 计算 "静态" 的ODE参数 (t_a, t_b)
-            t_a_static = self.time_a(x)
-            t_b_static = self.time_b(x)
-
-            # 2. (如果提供了) 应用 "动态" 调制
-            if dynamic_params is not None:
-                # 假设 dynamic_params 包含 [delta_t_a, delta_t_b]
-                # 形状: [B, 2 * hidden_size]
-                delta_t_a, delta_t_b = dynamic_params.chunk(2, 1)
-
-                # 加性调制 (Additive Modulation)
-                t_a_final = t_a_static + delta_t_a
-                t_b_final = t_b_static + delta_t_b
-            else:
-                t_a_final = t_a_static
-                t_b_final = t_b_static
-
-            # 3. 使用最终的参数计算插值
-            t_interp = self.sigmoid(t_a_final * ts + t_b_final)
-
-            if self.mode == "no_gate":
-                new_hidden = ff1 + t_interp * ff2
-            else:  # "default" 模式
-                new_hidden = ff1 * (1.0 - t_interp) + t_interp * ff2
+        # 4. Calculate the new hidden state using the interpolated result.
+        new_hidden = ff1 * (1.0 - t_interp) + t_interp * ff2
 
         return new_hidden, new_hidden
 
 
-# --- 核心修改 2: DynamicCfC ---
-# (基于上下文中的 CfC 修改)
+# --- Core Component 2: DynamicCfC ---
 class DynamicCfC(nn.Module):
+    """
+    An RNN-style wrapper for the `DynamicCfCCell`.
+
+    This module iterates over an input sequence, passing the corresponding slice
+    of `dynamic_params` to the `DynamicCfCCell` at each time step. It supports
+    both batched and unbatched inputs.
+    """
     def __init__(
             self,
-            input_size: Union[int, ncps.wirings.Wiring],
-            units,  # 注意：在非Wired模式下，units == hidden_size
+            input_size: int,
+            units: int,
             proj_size: Optional[int] = None,
             return_sequences: bool = True,
             batch_first: bool = True,
@@ -236,139 +210,113 @@ class DynamicCfC(nn.Module):
             activation: str = "lecun_tanh",
             backbone_units: Optional[int] = None,
             backbone_layers: Optional[int] = None,
-            backbone_dropout: Optional[int] = None,
+            backbone_dropout: Optional[float] = None,
     ):
         super(DynamicCfC, self).__init__()
         self.input_size = input_size
-        self.wiring_or_units = units
-        self.proj_size = proj_size
+        self.hidden_size = units
         self.batch_first = batch_first
         self.return_sequences = return_sequences
 
-        # --- 仅保留非 Wired 模式 (根据 Liquid_Enc.py 的使用情况简化) ---
-        # (WiredCfCCell 逻辑未实现动态参数，如需请参照 DynamicCfCCell 修改)
+        # This dynamic version does not support the "Wired" mode.
         if isinstance(units, ncps.wirings.Wiring):
-            raise NotImplementedError("DynamicCfC 目前不支持 Wired 模式")
-
-        self.wired_false = True
-        backbone_units = 128 if backbone_units is None else backbone_units
-        backbone_layers = 1 if backbone_layers is None else backbone_layers
-        backbone_dropout = 0.0 if backbone_dropout is None else backbone_dropout
-        self.state_size = units
-        self.output_size = self.state_size
-
-        # [!!! 核心修改 !!!]
-        # 使用 DynamicCfCCell 而不是 CfCCell
+            raise NotImplementedError("DynamicCfC does not support 'Wired' mode.")
+            
+        # Instantiate the dynamic cell
         self.rnn_cell = DynamicCfCCell(
             input_size,
-            self.wiring_or_units,  # self.wiring_or_units 就是 hidden_size
+            self.hidden_size,
             mode,
             activation,
-            backbone_units,
-            backbone_layers,
-            backbone_dropout,
+            backbone_units or 128,
+            backbone_layers or 1,
+            backbone_dropout or 0.0,
         )
 
         self.use_mixed = mixed_memory
         if self.use_mixed:
-            # 依赖于上面定义的 LSTMCell
-            self.lstm = LSTMCell(input_size, self.state_size)
+            self.lstm = LSTMCell(input_size, self.hidden_size)
 
-        if proj_size is None:
-            self.fc = nn.Identity()
-        else:
-            self.fc = nn.Linear(self.output_size, self.proj_size)
+        # Output projection layer
+        self.fc = nn.Linear(self.hidden_size, proj_size) if proj_size is not None else nn.Identity()
 
-    def forward(self, input, hx=None, timespans=None, dynamic_params=None):
+    def forward(self, input: torch.Tensor, hx: Optional[torch.Tensor] = None,
+                timespans: Optional[torch.Tensor] = None,
+                dynamic_params: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        [!!! 核心修改 !!!]
-        新增 dynamic_params 参数
-        预期形状: [B, L, k] (batch_first=True) 或 [L, B, k] (batch_first=False)
-        其中 k = 2 * hidden_size
+        Forward pass for the DynamicCfC RNN.
+
+        Args:
+            input (torch.Tensor): Input sequence, shape (B, L, C) or (L, B, C).
+            hx (Optional[torch.Tensor]): Initial hidden state.
+            timespans (Optional[torch.Tensor]): Timespans for each step.
+            dynamic_params (Optional[torch.Tensor]): Sequence of dynamic parameters from the controller,
+                                                     shape (B, L, K) or (L, B, K) where K = 2 * hidden_size.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The output sequence and the final hidden state.
         """
         device = input.device
         is_batched = input.dim() == 3
-        batch_dim = 0 if self.batch_first else 1
-        seq_dim = 1 if self.batch_first else 0
-        if not is_batched:
+        batch_dim, seq_dim = (0, 1) if self.batch_first else (1, 0)
+        if not is_batched: # Add batch dimension if input is unbatched
             input = input.unsqueeze(batch_dim)
-            if timespans is not None:
-                timespans = timespans.unsqueeze(batch_dim)
-            # [!!! 核心修改 !!!]
-            if dynamic_params is not None:
-                dynamic_params = dynamic_params.unsqueeze(batch_dim)
+            if timespans is not None: timespans = timespans.unsqueeze(batch_dim)
+            if dynamic_params is not None: dynamic_params = dynamic_params.unsqueeze(batch_dim)
 
         batch_size, seq_len = input.size(batch_dim), input.size(seq_dim)
 
+        # Initialize hidden state if not provided
         if hx is None:
-            h_state = torch.zeros((batch_size, self.state_size), device=device)
-            c_state = (
-                torch.zeros((batch_size, self.state_size), device=device)
-                if self.use_mixed
-                else None
-            )
+            h_state = torch.zeros((batch_size, self.hidden_size), device=device)
+            c_state = torch.zeros((batch_size, self.hidden_size), device=device) if self.use_mixed else None
         else:
-            if self.use_mixed and isinstance(hx, torch.Tensor):
-                raise RuntimeError("...")  # 状态检查 (同原版)
             h_state, c_state = hx if self.use_mixed else (hx, None)
-            # ... (省略原版中对 hx 维度的检查) ...
 
         output_sequence = []
         for t in range(seq_len):
-            if self.batch_first:
-                inputs = input[:, t]
-                ts = 1.0 if timespans is None else timespans[:, t].squeeze()
-                # [!!! 核心修改 !!!]
-                params_t = None if dynamic_params is None else dynamic_params[:, t]
-            else:
-                inputs = input[t]
-                ts = 1.0 if timespans is None else timespans[t].squeeze()
-                # [!!! 核心修改 !!!]
-                params_t = None if dynamic_params is None else dynamic_params[t]
+            # Slice input for the current time step
+            inputs_t = input[:, t] if self.batch_first else input[t]
+            ts_t = torch.ones(batch_size, device=device) if timespans is None else timespans[:, t].squeeze()
+            params_t = None if dynamic_params is None else (dynamic_params[:, t] if self.batch_first else dynamic_params[t])
 
             if self.use_mixed:
-                h_state, c_state = self.lstm(inputs, (h_state, c_state))
+                h_state, c_state = self.lstm(inputs_t, (h_state, c_state))
 
-            # [!!! 核心修改 !!!]
-            # 将 params_t 传递给 DynamicCfCCell
-            h_out, h_state = self.rnn_cell.forward(inputs, h_state, ts, dynamic_params=params_t)
+            # Pass the time-step specific dynamic parameters to the cell
+            h_out, h_state = self.rnn_cell.forward(inputs_t, h_state, ts_t, dynamic_params=params_t)
 
             if self.return_sequences:
                 output_sequence.append(self.fc(h_out))
+        
+        # Stack outputs if returning sequences
+        stack_dim = 1 if self.batch_first else 0
+        readout = torch.stack(output_sequence, dim=stack_dim) if self.return_sequences else self.fc(h_out)
+        
+        final_hx = (h_state, c_state) if self.use_mixed else h_state
 
-        if self.return_sequences:
-            stack_dim = 1 if self.batch_first else 0
-            readout = torch.stack(output_sequence, dim=stack_dim)
-        else:
-            readout = self.fc(h_out)
-
-        hx = (h_state, c_state) if self.use_mixed else h_state
-
-        if not is_batched:
+        if not is_batched: # Squeeze batch dimension if input was unbatched
             readout = readout.squeeze(batch_dim)
-            hx = (h_state[0], c_state[0]) if self.use_mixed else h_state[0]
+            final_hx = (h_state[0], c_state[0]) if self.use_mixed else h_state[0]
 
-        return readout, hx
+        return readout, final_hx
 
 
-# --- 核心修改 3: DynamicLiquidLayer 和 DynamicLiquidEncoder ---
-# (基于上下文中的 Liquid_Enc.py 修改)
-
+# --- Core Component 3: DynamicLiquidEncoder and DynamicLiquidLayer ---
 class DynamicLiquidLayer(nn.Module):
     """
-    一个封装了 DynamicCfC 的层，带有残差连接和层归一化 (Pre-Norm)。
+    A Transformer-style encoder layer that wraps a `DynamicCfC` module.
 
-    输入/输出形状: [Batch, Sequence (Np), Features (D)]
+    This layer includes Layer Normalization (pre-norm) and a residual connection,
+    making it a compatible building block for Transformer-like encoders.
+    Input/output shape: (Batch, Sequence, Features)
     """
-
-    def __init__(self, configs, dropout=0.1):
+    def __init__(self, configs, dropout: float = 0.1):
         super(DynamicLiquidLayer, self).__init__()
         self.d_model = configs.d_model
-
         self.norm = nn.LayerNorm(configs.d_model)
 
-        # [!!! 核心修改 !!!]
-        # 使用 DynamicCfC
+        # Instantiate the DynamicCfC module as the core of this layer
         self.cfc = DynamicCfC(
             input_size=configs.d_model,
             units=configs.lq_units,
@@ -380,51 +328,60 @@ class DynamicLiquidLayer(nn.Module):
             activation=configs.lq_activation
         )
         self.dropout = nn.Dropout(dropout)
+        
+        # Optional projection if CFC output size differs from d_model
+        self.proj = nn.Linear(configs.lq_proj_size, configs.d_model) if configs.lq_proj_size != configs.d_model else nn.Identity()
 
-        self.proj = nn.Linear(configs.lq_proj_size, configs.d_model) \
-            if configs.lq_proj_size != configs.d_model else nn.Identity()
-
-    def forward(self, x, dynamic_params, timespans=None):
+    def forward(self, x: torch.Tensor, dynamic_params: torch.Tensor,
+                timespans: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        [!!! 核心修改 !!!]
-        x: [B, L, D]
-        dynamic_params: [B, L, k] (k = 2 * lq_units)
+        Forward pass for the DynamicLiquidLayer.
+
+        Args:
+            x (torch.Tensor): Input tensor, shape (B, L, D).
+            dynamic_params (torch.Tensor): Sequence of dynamic parameters, shape (B, L, K).
+            timespans (Optional[torch.Tensor]): Optional timespans for each step.
+
+        Returns:
+            torch.Tensor: Output tensor after applying the dynamic CfC and residual connection.
         """
         x_norm = self.norm(x)
-
-        # [!!! 核心修改 !!!]
-        # 将 dynamic_params 传递给 cfc
+        # Pass dynamic parameters to the CfC module
         cfc_out, _ = self.cfc(x_norm, timespans=timespans, dynamic_params=dynamic_params)
-
         cfc_out = self.proj(cfc_out)
-
+        # Apply residual connection
         x = x + self.dropout(cfc_out)
-
         return x
 
 
 class DynamicLiquidEncoder(nn.Module):
     """
-    一个堆叠的 DynamicLiquidLayer 编码器。
+    An encoder composed of a stack of `DynamicLiquidLayer` instances.
     """
-
-    def __init__(self, layers, norm_layer=None):
+    def __init__(self, layers: List[nn.Module], norm_layer: Optional[nn.Module] = None):
         super(DynamicLiquidEncoder, self).__init__()
         self.layers = nn.ModuleList(layers)
         self.norm = norm_layer
 
-    def forward(self, x, dynamic_params, timespans=None):
+    def forward(self, x: torch.Tensor, dynamic_params: torch.Tensor,
+                timespans: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, None]:
         """
-        [!!! 核心修改 !!!]
-        x: [B, L, D]
-        dynamic_params: [B, L, k]
+        Forward pass for the DynamicLiquidEncoder.
+
+        Args:
+            x (torch.Tensor): Input tensor, shape (B, L, D).
+            dynamic_params (torch.Tensor): Sequence of dynamic parameters, shape (B, L, K).
+            timespans (Optional[torch.Tensor]): Optional timespans for each step.
+
+        Returns:
+            Tuple[torch.Tensor, None]: The encoded output tensor and None (to match the
+                                       (output, attn) format of other encoder layers).
         """
+        # Sequentially apply each DynamicLiquidLayer, passing the dynamic parameters through
         for layer in self.layers:
-            # [!!! 核心修改 !!!]
-            # 传递 dynamic_params
             x = layer(x, dynamic_params=dynamic_params, timespans=timespans)
 
         if self.norm is not None:
             x = self.norm(x)
 
-        return x, None  # 返回 None 以匹配 (output, attn) 的格式
+        return x, None

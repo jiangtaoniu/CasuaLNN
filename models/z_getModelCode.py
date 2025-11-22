@@ -1,36 +1,71 @@
-# 文件名: create_full_summary.py
-# 请将此文件放置在您的 models 文件夹下运行
+# Filename: z_getModelCode.py
+# (Originally named create_full_summary.py)
+#
+# This script should be placed in the 'models' folder to run correctly.
 
 import os
 import ast
 import re
 from typing import List, Set, Dict, Tuple
 
+"""
+This script is a developer utility for creating a self-contained code summary
+of a selected model and all its layer dependencies. It analyzes the model file,
+finds all direct and recursive dependencies within the 'layers' directory, and then
+consolidates the source code of the selected model(s) and all dependencies into
+a single, easy-to-share text file.
+"""
 
-# --- 核心辅助函数 ---
+# --- Core Helper Functions ---
 
 def find_project_root(start_path: str, markers: List[str]) -> str:
-    """从起始路径向上回溯，寻找项目根目录。"""
+    """
+    Traverses up from a starting path to find the project root directory.
+
+    The root is identified by the presence of marker files/directories like '.git'
+    or by being the parent of both 'layers' and 'models' directories.
+
+    Args:
+        start_path (str): The initial path to start the search from (e.g., the script's directory).
+        markers (List[str]): A list of marker file/directory names that indicate the project root.
+
+    Returns:
+        str: The absolute path to the project root.
+
+    Raises:
+        FileNotFoundError: If the project root cannot be determined.
+    """
     current_path = os.path.abspath(start_path)
     while True:
-        # 检查当前目录是否为 'layers' 或 'models' 的父目录
+        # Check if the current directory contains both 'layers' and 'models' subdirectories
         if os.path.isdir(os.path.join(current_path, 'layers')) and \
                 os.path.isdir(os.path.join(current_path, 'models')):
             return current_path
 
+        # Check for presence of root markers
         for marker in markers:
             if os.path.exists(os.path.join(current_path, marker)):
                 return current_path
 
         parent_path = os.path.dirname(current_path)
-        if parent_path == current_path:
-            raise FileNotFoundError("无法找到项目根目录。请确保脚本位于 'models' 文件夹内，"
-                                    "且同级目录存在 'layers' 文件夹。")
+        if parent_path == current_path: # Reached the filesystem root
+            raise FileNotFoundError("Could not find the project root. Please ensure the script is "
+                                    "run from the 'models' folder and that a 'layers' folder exists "
+                                    "at the same project level.")
         current_path = parent_path
 
 
 def get_files_in_current_directory(scan_path: str, excluded_files: Set[str]) -> List[str]:
-    """非递归地获取当前目录下的Python文件供用户选择。"""
+    """
+    Non-recursively gets a list of Python files in the current directory for user selection.
+
+    Args:
+        scan_path (str): The directory path to scan.
+        excluded_files (Set[str]): A set of filenames to exclude from the list.
+
+    Returns:
+        List[str]: A sorted list of selectable Python filenames.
+    """
     file_list = [
         f for f in os.listdir(scan_path)
         if f.endswith('.py') and os.path.isfile(os.path.join(scan_path, f)) and f not in excluded_files
@@ -40,11 +75,18 @@ def get_files_in_current_directory(scan_path: str, excluded_files: Set[str]) -> 
 
 def find_layer_imports_in_models(model_files: List[str], models_dir: str) -> Set[str]:
     """
-    步骤2: 从选定的模型文件中解析出直接导入的 'layers' 模块名。
+    Parses the selected model files to find all directly imported modules from the 'layers' package.
+
+    Args:
+        model_files (List[str]): List of selected model filenames.
+        models_dir (str): The absolute path to the 'models' directory.
+
+    Returns:
+        Set[str]: A set of unique layer module names that were directly imported.
     """
     layer_modules = set()
-    # 正则表达式匹配 'from layers.some_module import ...'
-    # 它会捕获 'some_module'
+    # Regex to match lines like: from layers.some_module import ...
+    # It captures the module name 'some_module'.
     import_pattern = re.compile(r"^\s*from\s+layers\.([a-zA-Z0-9_]+)", re.MULTILINE)
 
     print("\n[Analysis Step 1/3] Finding direct layer dependencies in selected models...")
@@ -64,12 +106,16 @@ def find_layer_imports_in_models(model_files: List[str], models_dir: str) -> Set
     return layer_modules
 
 
-def find_all_recursive_dependencies(
-        project_root: str,
-        initial_layer_modules: Set[str]
-) -> Dict[str, str]:
+def find_all_recursive_dependencies(project_root: str, initial_layer_modules: Set[str]) -> Dict[str, str]:
     """
-    步骤3: 从初始'layers'模块开始，递归查找所有相关的'layers'模块。
+    Recursively finds all nested dependencies starting from an initial set of layer modules.
+
+    Args:
+        project_root (str): The absolute path to the project root.
+        initial_layer_modules (Set[str]): The initial set of layer module names to start the search from.
+
+    Returns:
+        Dict[str, str]: A dictionary mapping each found module name to its relative path from the project root.
     """
     modules_to_process = set(initial_layer_modules)
     processed_modules = set()
@@ -80,7 +126,7 @@ def find_all_recursive_dependencies(
         print(f"[!] Error: 'layers' directory not found at '{layers_dir}'.")
         return {}
 
-    # 缓存layers目录下的所有py文件
+    # Cache all Python files in the layers directory for quick lookups
     layer_module_cache: Dict[str, str] = {
         os.path.splitext(f)[0]: os.path.join(layers_dir, f)
         for f in os.listdir(layers_dir) if f.endswith('.py')
@@ -96,11 +142,11 @@ def find_all_recursive_dependencies(
 
         if module_name in layer_module_cache:
             full_path = layer_module_cache[module_name]
-            relative_path = os.path.relpath(full_path, project_root).replace("\\", "/")
+            relative_path = os.path.relpath(full_path, project_root).replace("\", "/")
             found_module_paths[module_name] = relative_path
             print(f"  -> Including dependency '{module_name}' from: {relative_path}")
 
-            # 解析当前文件的 'from layers...' 导入
+            # Parse the current file for further 'from layers...' imports
             import_pattern = re.compile(r"^\s*from\s+layers\.([a-zA-Z0-9_]+)", re.MULTILINE)
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
@@ -110,22 +156,25 @@ def find_all_recursive_dependencies(
                         if new_dependency not in processed_modules:
                             modules_to_process.add(new_dependency)
             except Exception:
-                pass
+                pass  # Ignore files that can't be read
         else:
-            print(f"  - Warning: Layer module '{module_name}' was imported but not found in 'layers' directory.")
+            print(f"  - Warning: Layer module '{module_name}' was imported but not found in the 'layers' directory.")
 
     print(f"[*] Total of {len(found_module_paths)} layer modules will be included.")
     return found_module_paths
 
 
-def create_final_summary(
-        project_root: str,
-        selected_models: List[str],
-        all_layer_paths: Dict[str, str],
-        output_filename: str
-):
+def create_final_summary(project_root: str, selected_models: List[str],
+                         all_layer_paths: Dict[str, str], output_filename: str):
     """
-    步骤4: 生成最终的代码摘要文件。
+    Generates the final code summary file by concatenating the content of all
+    selected model and layer files.
+
+    Args:
+        project_root (str): The absolute path to the project root.
+        selected_models (List[str]): List of selected model filenames.
+        all_layer_paths (Dict[str, str]): Dictionary of all dependent layer modules and their paths.
+        output_filename (str): The name of the output summary file.
     """
     models_dir = os.path.join(project_root, 'models')
     output_path = os.path.join(models_dir, output_filename)
@@ -136,33 +185,33 @@ def create_final_summary(
         summary_file.write(f"# Code Summary for Selected Models and All Their Dependencies\n")
         summary_file.write(f"# Project Root: {project_root}\n\n")
 
-        # --- 模块清单 ---
+        # --- Write a manifest of all included modules ---
         summary_file.write("Summary includes the following modules:\n\n")
 
-        summary_file.write("# --- Layer Modules ---\n")
+        summary_file.write("# --- Layer Modules ---")
         sorted_layers = sorted(all_layer_paths.items())
         for module_name, path in sorted_layers:
             summary_file.write(f"- {module_name} ({path})\n")
 
-        summary_file.write("\n# --- Model Modules ---\n")
+        summary_file.write("\n# --- Model Modules ---")
         for model_file in selected_models:
             summary_file.write(f"- {model_file} (models/{model_file})\n")
 
         summary_file.write("\n" + "=" * 80 + "\n\n")
 
-        # --- 写入代码内容 ---
+        # --- Concatenate the content of all files ---
         all_files_to_write = []
-        # 添加所有layer文件
-        for module, path in sorted_layers:
-            all_files_to_write.append({'name': module, 'path': path})
-        # 添加所有model文件
+        # Add all layer files
+        for _, path in sorted_layers:
+            all_files_to_write.append({'path': path})
+        # Add all model files
         for model_file in sorted(selected_models):
-            all_files_to_write.append({'name': os.path.splitext(model_file)[0], 'path': f"models/{model_file}"})
+            all_files_to_write.append({'path': f"models/{model_file}"})
 
         total_files = len(all_files_to_write)
         for i, file_info in enumerate(all_files_to_write):
-            module_name = file_info['name']
             relative_path = file_info['path']
+            module_name = os.path.splitext(os.path.basename(relative_path))[0]
             full_path = os.path.join(project_root, relative_path)
 
             print(f"  [{i + 1}/{total_files}] Adding content of: {relative_path}")
@@ -185,13 +234,13 @@ def create_final_summary(
     print(f"\n[*] Summary successfully created at: {output_path}")
 
 
-# --- 主执行函数 ---
+# --- Main Execution Block ---
 
 if __name__ == "__main__":
     OUTPUT_FILENAME = "z_CodeSummary_Full_Stack.txt"
 
     try:
-        # 步骤 1: 确定路径
+        # Step 1: Determine project and model directory paths
         models_dir = os.path.dirname(os.path.abspath(__file__))
         project_markers = ['.git', 'pyproject.toml']
         project_root = find_project_root(models_dir, project_markers)
@@ -202,7 +251,7 @@ if __name__ == "__main__":
         print(f"[*] Project Root detected: {project_root}")
         print(f"[*] Running in 'models' directory: {models_dir}")
 
-        # 步骤 2: 列出并选择模型文件
+        # Step 2: List selectable model files and get user input
         excluded_files = {OUTPUT_FILENAME, os.path.basename(__file__)}
         selectable_models = get_files_in_current_directory(models_dir, excluded_files)
 
@@ -216,6 +265,7 @@ if __name__ == "__main__":
             selected_models = []
             while True:
                 try:
+                    # Prompt user for selection
                     raw_input = input(">>> Enter file numbers, separated by spaces (e.g., 1 3): ")
                     if not raw_input.strip(): continue
 
@@ -235,11 +285,11 @@ if __name__ == "__main__":
             for model in selected_models:
                 print(f"  - {model}")
 
-            # 步骤 3 & 4: 执行两阶段依赖分析
+            # Step 3 & 4: Perform dependency analysis
             direct_layer_deps = find_layer_imports_in_models(selected_models, models_dir)
             all_layer_dependencies = find_all_recursive_dependencies(project_root, direct_layer_deps)
 
-            # 步骤 5: 生成最终摘要
+            # Step 5: Generate the final summary file
             if not all_layer_dependencies and not selected_models:
                 print("\n[*] No modules to summarize. Exiting.")
             else:

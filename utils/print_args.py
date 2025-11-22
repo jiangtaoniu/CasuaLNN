@@ -1,45 +1,65 @@
+"""
+This script provides a utility function for printing experiment configurations
+in a structured and readable format to the console. It uses ANSI escape codes
+for styling the output.
+"""
+
 def print_args(args):
-    print("\033[1m" + "Basic Config" + "\033[0m")
+    """
+    Prints the experiment configurations from an argparse.Namespace object in a
+    formatted, two-column layout.
+
+    Args:
+        args: An argparse.Namespace object containing all experiment configurations.
+    """
+    # ANSI escape codes for styling: '\033[1m' for bold, '\033[0m' to reset.
+    bold_start = "\033[1m"
+    bold_end = "\033[0m"
+
+    print(f"{bold_start}Basic Config{bold_end}")
     print(f'  {"Task Name:":<20}{args.task_name:<20}{"Is Training:":<20}{args.is_training:<20}')
     print(f'  {"Model ID:":<20}{args.model_id:<20}{"Model:":<20}{args.model:<20}')
     print()
 
-    print("\033[1m" + "Data Loader" + "\033[0m")
+    print(f"{bold_start}Data Loader{bold_end}")
     print(f'  {"Data:":<20}{args.data:<20}{"Root Path:":<20}{args.root_path:<20}')
     print(f'  {"Data Path:":<20}{args.data_path:<20}{"Features:":<20}{args.features:<20}')
     print(f'  {"Target:":<20}{args.target:<20}{"Freq:":<20}{args.freq:<20}')
     print(f'  {"Checkpoints:":<20}{args.checkpoints:<20}')
     print()
 
-    if args.task_name in ['long_term_forecast', 'short_term_forecast']:
-        print("\033[1m" + "Forecasting Task" + "\033[0m")
+    # Conditional printing for forecasting-specific parameters
+    if hasattr(args, 'task_name') and args.task_name in ['long_term_forecast', 'short_term_forecast']:
+        print(f"{bold_start}Forecasting Task{bold_end}")
         print(f'  {"Seq Len:":<20}{args.seq_len:<20}{"Label Len:":<20}{args.label_len:<20}')
         print(f'  {"Pred Len:":<20}{args.pred_len:<20}{"Seasonal Patterns:":<20}{args.seasonal_patterns:<20}')
         print(f'  {"Inverse:":<20}{args.inverse:<20}')
         print()
 
-    if args.task_name == 'imputation':
-        print("\033[1m" + "Imputation Task" + "\033[0m")
+    # Conditional printing for imputation-specific parameters
+    if hasattr(args, 'task_name') and args.task_name == 'imputation':
+        print(f"{bold_start}Imputation Task{bold_end}")
         print(f'  {"Mask Rate:":<20}{args.mask_rate:<20}')
         print()
 
-    if args.task_name == 'anomaly_detection':
-        print("\033[1m" + "Anomaly Detection Task" + "\033[0m")
+    # Conditional printing for anomaly detection-specific parameters
+    if hasattr(args, 'task_name') and args.task_name == 'anomaly_detection':
+        print(f"{bold_start}Anomaly Detection Task{bold_end}")
         print(f'  {"Anomaly Ratio:":<20}{args.anomaly_ratio:<20}')
         print()
 
-    print("\033[1m" + "Model Parameters" + "\033[0m")
+    print(f"{bold_start}Model Parameters{bold_end}")
     print(f'  {"Top k:":<20}{args.top_k:<20}{"Num Kernels:":<20}{args.num_kernels:<20}')
     print(f'  {"Enc In:":<20}{args.enc_in:<20}{"Dec In:":<20}{args.dec_in:<20}')
     print(f'  {"C Out:":<20}{args.c_out:<20}{"d model:":<20}{args.d_model:<20}')
-    print(f'  {"n heads:":<20}{args.n_heads:<20}{"e layers:":<20}{args.e_layers:<20}')
+    print(f'  {"n heads:":<20}{args.n_heads:<20}{"e layers:":<2.0}{args.e_layers:<20}')
     print(f'  {"d layers:":<20}{args.d_layers:<20}{"d FF:":<20}{args.d_ff:<20}')
     print(f'  {"Moving Avg:":<20}{args.moving_avg:<20}{"Factor:":<20}{args.factor:<20}')
     print(f'  {"Distil:":<20}{args.distil:<20}{"Dropout:":<20}{args.dropout:<20}')
     print(f'  {"Embed:":<20}{args.embed:<20}{"Activation:":<20}{args.activation:<20}')
     print()
 
-    print("\033[1m" + "Run Parameters" + "\033[0m")
+    print(f"{bold_start}Run Parameters{bold_end}")
     print(f'  {"Num Workers:":<20}{args.num_workers:<20}{"Itr:":<20}{args.itr:<20}')
     print(f'  {"Train Epochs:":<20}{args.train_epochs:<20}{"Batch Size:":<20}{args.batch_size:<20}')
     print(f'  {"Patience:":<20}{args.patience:<20}{"Learning Rate:":<20}{args.learning_rate:<20}')
@@ -47,12 +67,14 @@ def print_args(args):
     print(f'  {"Lradj:":<20}{args.lradj:<20}{"Use Amp:":<20}{args.use_amp:<20}')
     print()
 
-    print("\033[1m" + "GPU" + "\033[0m")
+    print(f"{bold_start}GPU{bold_end}")
     print(f'  {"Use GPU:":<20}{args.use_gpu:<20}{"GPU:":<20}{args.gpu:<20}')
     print(f'  {"Use Multi GPU:":<20}{args.use_multi_gpu:<20}{"Devices:":<20}{args.devices:<20}')
     print()
 
-    print("\033[1m" + "De-stationary Projector Params" + "\033[0m")
-    p_hidden_dims_str = ', '.join(map(str, args.p_hidden_dims))
-    print(f'  {"P Hidden Dims:":<20}{p_hidden_dims_str:<20}{"P Hidden Layers:":<20}{args.p_hidden_layers:<20}') 
-    print()
+    # Specific handling for parameters that might be lists or require special formatting
+    if hasattr(args, 'p_hidden_dims'):
+        print(f"{bold_start}De-stationary Projector Params{bold_end}")
+        p_hidden_dims_str = ', '.join(map(str, args.p_hidden_dims)) # Join list elements into a string
+        print(f'  {"P Hidden Dims:":<20}{p_hidden_dims_str:<20}{"P Hidden Layers:":<20}{args.p_hidden_layers:<20}')
+        print()

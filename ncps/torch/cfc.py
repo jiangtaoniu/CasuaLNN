@@ -12,20 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import torch
 from torch import nn
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 import ncps
-from . import CfCCell, WiredCfCCell
+from .cfc_cell import CfCCell
+from .wired_cfc_cell import WiredCfCCell
 from .lstm import LSTMCell
 
+"""
+This file implements the `CfC` class, a full recurrent neural network that
+uses the `CfCCell` (or `WiredCfCCell`) to process sequences of data.
+"""
 
 class CfC(nn.Module):
+    """
+    Applies a `Closed-form Continuous-time <https://arxiv.org/abs/2106.13898>`_ RNN
+    to an input sequence.
+
+    This class is an RNN-style wrapper for the `CfCCell`, handling the processing of
+    entire sequences by iterating over time steps.
+
+    **Examples**
+
+    A fully-connected CfC network:
+        >>> from ncps.torch import CfC
+        >>>
+        >>> rnn = CfC(20, 50)
+        >>> x = torch.randn(2, 3, 20)  # (batch, time, features)
+        >>> h0 = torch.zeros(2, 50)   # (batch, units)
+        >>> output, hn = rnn(x, h0)
+
+    A structured, "wired" CfC network:
+        >>> from ncps.torch import CfC
+        >>> from ncps.wirings import NCP
+        >>>
+        >>> wiring = NCP(inter_neurons=10, command_neurons=8, motor_neurons=4, ...)
+        >>> rnn = CfC(20, wiring) # input_size=20
+        >>>
+        >>> x = torch.randn(2, 3, 20)   # (batch, time, features)
+        >>> h0 = torch.zeros(2, wiring.units) # (batch, wiring.units)
+        >>> output, hn = rnn(x, h0)
+    """
+
     def __init__(
         self,
-        input_size: Union[int, ncps.wirings.Wiring],
-        units,
+        input_size: int,
+        units: Union[int, ncps.wirings.Wiring],
         proj_size: Optional[int] = None,
         return_sequences: bool = True,
         batch_first: bool = True,
@@ -34,32 +67,25 @@ class CfC(nn.Module):
         activation: str = "lecun_tanh",
         backbone_units: Optional[int] = None,
         backbone_layers: Optional[int] = None,
-        backbone_dropout: Optional[int] = None,
+        backbone_dropout: Optional[float] = None,
     ):
-        """Applies a `Closed-form Continuous-time <https://arxiv.org/abs/2106.13898>`_ RNN to an input sequence.
-
-        Examples::
-
-             >>> from ncps.torch import CfC
-             >>>
-             >>> rnn = CfC(20,50)
-             >>> x = torch.randn(2, 3, 20) # (batch, time, features)
-             >>> h0 = torch.zeros(2,50) # (batch, units)
-             >>> output, hn = rnn(x,h0)
-
-        :param input_size: Number of input features
-        :param units: Number of hidden units
-        :param proj_size: If not None, the output of the RNN will be projected to a tensor with dimension proj_size (i.e., an implict linear output layer)
-        :param return_sequences: Whether to return the full sequence or just the last output
-        :param batch_first: Whether the batch or time dimension is the first (0-th) dimension
-        :param mixed_memory: Whether to augment the RNN by a `memory-cell <https://arxiv.org/abs/2006.04418>`_ to help learn long-term dependencies in the data
-        :param mode: Either "default", "pure" (direct solution approximation), or "no_gate" (without second gate).
-        :param activation: Activation function used in the backbone layers
-        :param backbone_units: Number of hidden units in the backbone layer (default 128)
-        :param backbone_layers: Number of backbone layers (default 1)
-        :param backbone_dropout: Dropout rate in the backbone layers (default 0)
         """
+        Initializes the CfC module.
 
+        Args:
+            input_size (int): The number of input features.
+            units (Union[int, ncps.wirings.Wiring]): The number of hidden units for a fully-connected network,
+                                                    or a pre-configured `Wiring` object for a structured network.
+            proj_size (Optional[int]): If not None, projects the output of the RNN to this dimension.
+            return_sequences (bool): If True, returns the full sequence of outputs. If False, returns only the last output.
+            batch_first (bool): If True, the input and output tensors are provided as (batch, seq, feature).
+            mixed_memory (bool): If True, augments the CfC state with an LSTM-style memory cell.
+            mode (str): The operational mode for the CfC cell ('default', 'pure', 'no_gate').
+            activation (str): The activation function for the backbone network.
+            backbone_units (Optional[int]): The number of units in the backbone's hidden layers.
+            backbone_layers (Optional[int]): The number of layers in the backbone network.
+            backbone_dropout (Optional[float]): The dropout rate for the backbone network.
+        """
         super(CfC, self).__init__()
         self.input_size = input_size
         self.wiring_or_units = units
@@ -67,28 +93,19 @@ class CfC(nn.Module):
         self.batch_first = batch_first
         self.return_sequences = return_sequences
 
+        # Configure either a "wired" (structured) or a "fully-connected" (dense) cell
         if isinstance(units, ncps.wirings.Wiring):
+            # A structured network defined by a Wiring object
             self.wired_mode = True
-            if backbone_units is not None:
-                raise ValueError(f"Cannot use backbone_units in wired mode")
-            if backbone_layers is not None:
-                raise ValueError(f"Cannot use backbone_layers in wired mode")
-            if backbone_dropout is not None:
-                raise ValueError(f"Cannot use backbone_dropout in wired mode")
-            # self.rnn_cell = WiredCfCCell(input_size, wiring_or_units)
+            if any(arg is not None for arg in [backbone_units, backbone_layers, backbone_dropout]):
+                raise ValueError("Backbone arguments are not supported in wired mode.")
             self.wiring = units
             self.state_size = self.wiring.units
             self.output_size = self.wiring.output_dim
-            self.rnn_cell = WiredCfCCell(
-                input_size,
-                self.wiring_or_units,
-                mode,
-            )
+            self.rnn_cell = WiredCfCCell(input_size, self.wiring_or_units, mode)
         else:
-            self.wired_false = True
-            backbone_units = 128 if backbone_units is None else backbone_units
-            backbone_layers = 1 if backbone_layers is None else backbone_layers
-            backbone_dropout = 0.0 if backbone_dropout is None else backbone_dropout
+            # A fully-connected network
+            self.wired_mode = False
             self.state_size = units
             self.output_size = self.state_size
             self.rnn_cell = CfCCell(
@@ -96,31 +113,38 @@ class CfC(nn.Module):
                 self.wiring_or_units,
                 mode,
                 activation,
-                backbone_units,
-                backbone_layers,
-                backbone_dropout,
+                backbone_units or 128,
+                backbone_layers or 1,
+                backbone_dropout or 0.0,
             )
+            
         self.use_mixed = mixed_memory
         if self.use_mixed:
             self.lstm = LSTMCell(input_size, self.state_size)
 
-        if proj_size is None:
-            self.fc = nn.Identity()
-        else:
-            self.fc = nn.Linear(self.output_size, self.proj_size)
+        # Optional output projection layer
+        self.fc = nn.Linear(self.output_size, self.proj_size) if proj_size is not None else nn.Identity()
 
-    def forward(self, input, hx=None, timespans=None):
+    def forward(self, input: torch.Tensor, hx: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+                timespans: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
         """
+        Forward pass for the CfC RNN.
 
-        :param input: Input tensor of shape (L,C) in batchless mode, or (B,L,C) if batch_first was set to True and (L,B,C) if batch_first is False
-        :param hx: Initial hidden state of the RNN of shape (B,H) if mixed_memory is False and a tuple ((B,H),(B,H)) if mixed_memory is True. If None, the hidden states are initialized with all zeros.
-        :param timespans:
-        :return: A pair (output, hx), where output and hx the final hidden state of the RNN
+        Args:
+            input (torch.Tensor): Input sequence. Shape (L, C) for unbatched, (B, L, C) if `batch_first=True`,
+                                  or (L, B, C) if `batch_first=False`.
+            hx (Optional): Initial hidden state. If None, initialized to zeros. If `mixed_memory=True`,
+                           this should be a tuple (h0, c0).
+            timespans (Optional[torch.Tensor]): The elapsed time between sequence steps. If None, assumed to be 1.0.
+
+        Returns:
+            A tuple (output, hx), where `output` is the output sequence and `hx` is the final hidden state.
         """
         device = input.device
         is_batched = input.dim() == 3
-        batch_dim = 0 if self.batch_first else 1
-        seq_dim = 1 if self.batch_first else 0
+        batch_dim, seq_dim = (0, 1) if self.batch_first else (1, 0)
+
+        # Add batch dimension if input is unbatched
         if not is_batched:
             input = input.unsqueeze(batch_dim)
             if timespans is not None:
@@ -128,62 +152,47 @@ class CfC(nn.Module):
 
         batch_size, seq_len = input.size(batch_dim), input.size(seq_dim)
 
+        # Initialize hidden state if not provided
         if hx is None:
             h_state = torch.zeros((batch_size, self.state_size), device=device)
-            c_state = (
-                torch.zeros((batch_size, self.state_size), device=device)
-                if self.use_mixed
-                else None
-            )
+            c_state = torch.zeros((batch_size, self.state_size), device=device) if self.use_mixed else None
         else:
             if self.use_mixed and isinstance(hx, torch.Tensor):
-                raise RuntimeError(
-                    "Running a CfC with mixed_memory=True, requires a tuple (h0,c0) to be passed as state (got torch.Tensor instead)"
-                )
+                raise RuntimeError("CfC with mixed_memory=True requires a tuple (h0, c0) as initial state.")
             h_state, c_state = hx if self.use_mixed else (hx, None)
-            if is_batched:
-                if h_state.dim() != 2:
-                    msg = (
-                        "For batched 2-D input, hx and cx should "
-                        f"also be 2-D but got ({h_state.dim()}-D) tensor"
-                    )
-                    raise RuntimeError(msg)
-            else:
-                # batchless  mode
-                if h_state.dim() != 1:
-                    msg = (
-                        "For unbatched 1-D input, hx and cx should "
-                        f"also be 1-D but got ({h_state.dim()}-D) tensor"
-                    )
-                    raise RuntimeError(msg)
+            if not is_batched: # Unsqueeze hidden state if input was unbatched
                 h_state = h_state.unsqueeze(0)
-                c_state = c_state.unsqueeze(0) if c_state is not None else None
+                if c_state is not None: c_state = c_state.unsqueeze(0)
 
+        # Iterate over the sequence
         output_sequence = []
         for t in range(seq_len):
-            if self.batch_first:
-                inputs = input[:, t]
-                ts = 1.0 if timespans is None else timespans[:, t].squeeze()
-            else:
-                inputs = input[t]
-                ts = 1.0 if timespans is None else timespans[t].squeeze()
+            # Slice input for the current time step
+            inputs_t = input[:, t] if self.batch_first else input[t]
+            ts_t = torch.ones(batch_size, device=device) if timespans is None else timespans[:, t].squeeze()
 
             if self.use_mixed:
-                h_state, c_state = self.lstm(inputs, (h_state, c_state))
-            h_out, h_state = self.rnn_cell.forward(inputs, h_state, ts)
+                h_state, c_state = self.lstm(inputs_t, (h_state, c_state))
+            
+            # Pass to the underlying RNN cell
+            h_out, h_state = self.rnn_cell.forward(inputs_t, h_state, ts_t)
+            
             if self.return_sequences:
                 output_sequence.append(self.fc(h_out))
 
+        # Stack outputs if returning sequences, otherwise return the last output
         if self.return_sequences:
             stack_dim = 1 if self.batch_first else 0
             readout = torch.stack(output_sequence, dim=stack_dim)
         else:
             readout = self.fc(h_out)
-        hx = (h_state, c_state) if self.use_mixed else h_state
+        
+        # Package final hidden state
+        final_hx = (h_state, c_state) if self.use_mixed else h_state
 
+        # Squeeze batch dimension if input was unbatched
         if not is_batched:
-            # batchless  mode
             readout = readout.squeeze(batch_dim)
-            hx = (h_state[0], c_state[0]) if self.use_mixed else h_state[0]
+            final_hx = (h_state[0], c_state[0]) if self.use_mixed else h_state[0]
 
-        return readout, hx
+        return readout, final_hx
