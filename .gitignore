@@ -166,3 +166,6 @@ result_anomaly_detection.txt
 scripts/augmentation/
 run_anylearn.py
 environment.txt
+
+# Local environment execution script
+start_claude_danger.bat
