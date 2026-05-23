@@ -5,10 +5,6 @@ import random
 import numpy as np
 
 from exp.exp_long_term_forecasting import Exp_Long_Term_Forecast
-from exp.exp_short_term_forecasting import Exp_Short_Term_Forecast
-from exp.exp_imputation import Exp_Imputation
-from exp.exp_classification import Exp_Classification
-from exp.exp_anomaly_detection import Exp_Anomaly_Detection
 
 
 def main():
@@ -34,10 +30,10 @@ def main():
     # 1. Basic & Experiment Setup
     # =====================================================================================
     parser.add_argument('--is_training', type=int, default=1, help='1 for training and testing, 0 for testing only.')
-    parser.add_argument('--model_id', type=str, default='ETTm1_96_96', help='A unique identifier for the experiment.')
+    parser.add_argument('--model_id', type=str, default='ETTh1_96_96', help='A unique identifier for the experiment.')
     parser.add_argument('--model', type=str, default='CasuaLNN', help='Model name, e.g., CasuaLNN, TimeMixer, etc.')
     parser.add_argument('--task_name', type=str, default='long_term_forecast',
-                        help='Task name. Options: [long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
+                        help='Task name. Options: [long_term_forecast]')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='Location to save model checkpoints.')
     parser.add_argument('--des', type=str, default='Exp', help='A description for the experiment.')
     parser.add_argument('--itr', type=int, default=1, help='Number of times to repeat the experiment.')
@@ -46,9 +42,9 @@ def main():
     # =====================================================================================
     # 2. Data Loader Setup
     # =====================================================================================
-    parser.add_argument('--data', type=str, default='ETTm1', help='Dataset name.')
+    parser.add_argument('--data', type=str, default='ETTh1', help='Dataset name.')
     parser.add_argument('--root_path', type=str, default='./dataset/ETT/', help='Root directory of the data file.')
-    parser.add_argument('--data_path', type=str, default='ETTm1.csv', help='Name of the data file.')
+    parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='Name of the data file.')
     parser.add_argument('--features', type=str, default='M',
                         help='Forecasting task type: M for multivariate, S for univariate, MS for multivariate-to-univariate.')
     parser.add_argument('--target', type=str, default='OT', help='Target feature column name for S or MS tasks.')
@@ -171,29 +167,21 @@ def main():
     print(args)
 
     # Map task name to the corresponding experiment class
-    task_map = {
-        'long_term_forecast': Exp_Long_Term_Forecast,
-        'short_term_forecast': Exp_Short_Term_Forecast,
-        'imputation': Exp_Imputation,
-        'anomaly_detection': Exp_Anomaly_Detection,
-        'classification': Exp_Classification,
-    }
-    Exp = task_map.get(args.task_name, Exp_Long_Term_Forecast)
+    Exp = Exp_Long_Term_Forecast
 
     if args.is_training:
         for ii in range(args.itr):
             # Define a unique setting string for this experiment run.
             # emb: 'E' for Enhanced, 'L' for Linear
             # temp: 'Y' for Temporal Encoder, 'N' for No
-            setting = (
-                f'{args.model_id}_{args.model}_{args.data}_' 
-                f'sl{args.seq_len}_pl{args.pred_len}_' 
-                f'dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_' 
-                f'patch{args.patch_len}_stride{args.stride}_' 
-                f'elipt{args.e_layers_ipt}_elpdm{args.e_layers_pdm}_' 
-                f'emb{"E" if args.use_enhanced_embedding else "L"}_' 
-                f'temp{"Y" if args.use_temporal_encoder else "N"}_' 
-                f'{args.des}_{ii}')
+            setting = (f'{args.model_id}_{args.model}_{args.data}_' 
+                       f'sl{args.seq_len}_pl{args.pred_len}_' 
+                       f'dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_' 
+                       f'patch{args.patch_len}_stride{args.stride}_' 
+                       f'elipt{args.e_layers_ipt}_elpdm{args.e_layers_pdm}_' 
+                       f'emb{"E" if args.use_enhanced_embedding else "L"}_' 
+                       f'temp{"Y" if args.use_temporal_encoder else "N"}_' 
+                       f'{args.des}_{ii}')
 
             exp = Exp(args)
             print(f'>>>>>>> Starting Training: {setting} >>>>>>>>>>>>>>>>>>>>>>>>>>')
@@ -204,15 +192,14 @@ def main():
                 torch.cuda.empty_cache()
     else:
         ii = 0
-        setting = (
-            f'{args.model_id}_{args.model}_{args.data}_' 
-            f'sl{args.seq_len}_pl{args.pred_len}_' 
-            f'dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_' 
-            f'patch{args.patch_len}_stride{args.stride}_' 
-            f'elipt{args.e_layers_ipt}_elpdm{args.e_layers_pdm}_' 
-            f'emb{"E" if args.use_enhanced_embedding else "L"}_' 
-            f'temp{"Y" if args.use_temporal_encoder else "N"}_' 
-            f'{args.des}_{ii}')
+        setting = (f'{args.model_id}_{args.model}_{args.data}_' 
+                   f'sl{args.seq_len}_pl{args.pred_len}_' 
+                   f'dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_' 
+                   f'patch{args.patch_len}_stride{args.stride}_' 
+                   f'elipt{args.e_layers_ipt}_elpdm{args.e_layers_pdm}_' 
+                   f'emb{"E" if args.use_enhanced_embedding else "L"}_' 
+                   f'temp{"Y" if args.use_temporal_encoder else "N"}_' 
+                   f'{args.des}_{ii}')
 
         exp = Exp(args)
         print(f'>>>>>>> Starting Testing: {setting} <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')

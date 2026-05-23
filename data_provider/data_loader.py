@@ -1086,7 +1086,7 @@ from sklearn.preprocessing import StandardScaler
 
 class Dataset_PEMS(Dataset):
     def __init__(self, args, root_path, flag='train', size=None,
-                 features='S', data_path='pems-bay.npz',  # data_path现在应指向包含3列特征的文件
+                 features='S', data_path='pems-bay.npz',  
                  target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
         # size [seq_len, label_len, pred_len]
         self.args = args
@@ -1110,13 +1110,13 @@ class Dataset_PEMS(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        # --- 1. 加载已包含 [value, tod, dow] 的数据 ---
+        
         data_file = os.path.join(self.root_path, self.data_path)
-        print(f'加载PEMS数据 (包含value, tod, dow): {data_file}')
-        # 假设数据形状为 (总时间步数, 节点数, 3)
+        print(f'Loading PEMS data (includes value, tod, dow): {data_file}')
+        
         full_data = np.load(data_file, allow_pickle=True)['data']
 
-        # --- 2. 数据集划分 ---
+        
         train_ratio = 0.6
         valid_ratio = 0.2
         num_samples = len(full_data)
@@ -1129,25 +1129,25 @@ class Dataset_PEMS(Dataset):
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        # 获取当前数据集划分
+        
         current_data_split = full_data[border1:border2]
 
-        # --- 3. 数据集划分 ---
+        
         self.scaler = StandardScaler()
         if self.scale:
-            # a. 从训练集中提取 'value' 特征来拟合 scaler
+            
             train_values = full_data[:num_train, :, 0]
             self.scaler.fit(train_values)
 
-            # b. 从当前数据划分中提取 'value' 特征进行变换
+            
             values_to_scale = current_data_split[:, :, 0]
             scaled_values = self.scaler.transform(values_to_scale)
 
-            # c. 将缩放后的 'value' 与原始的 'tod' 和 'dow' 重组
+            
             time_features = current_data_split[:, :, 1:]
             scaled_values_3d = np.expand_dims(scaled_values, axis=-1)
 
-            # d. 最终的数据
+            
             data = np.concatenate([scaled_values_3d, time_features], axis=-1)
             print(f"数据已选择性标准化 (fit on train split's value feature)。")
         else:
@@ -1159,9 +1159,9 @@ class Dataset_PEMS(Dataset):
         self.data_y = data
 
     def __getitem__(self, index):
-        # 与您的实验代码逻辑保持一致
+        
         if self.set_type == 2:  # test
-            s_begin = index * 1        #以前是*12
+            s_begin = index * 1        
         else:
             s_begin = index
 
@@ -1172,7 +1172,7 @@ class Dataset_PEMS(Dataset):
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
 
-        # _mark 变量是占位符, 因为您的模型框架会忽略它们
+        
         seq_x_mark = torch.zeros((seq_x.shape[0], 1))
         seq_y_mark = torch.zeros((seq_y.shape[0], 1))
 
@@ -1180,16 +1180,16 @@ class Dataset_PEMS(Dataset):
 
     def __len__(self):
         total_len = len(self.data_x)
-        # 确保窗口不会超出数据末端
-        # 注意: 您的原始 __len__ 对于预测任务是正确的
+        
+        
         # len(self.data_x) - self.seq_len - self.pred_len + 1
         window_size = self.seq_len + self.pred_len
 
         if self.set_type == 2:  # test: sliding window with stride 12
-            return (total_len - window_size + 1) // 1 if total_len >= window_size else 0       #以前是// 12
+            return (total_len - window_size + 1) // 1 if total_len >= window_size else 0       
         else:
             return total_len - window_size + 1 if total_len >= window_size else 0
 
     def inverse_transform(self, data):
-        # data是模型预测出的'value'部分, 形状为(B*T, N), 正好匹配scaler
+        
         return self.scaler.inverse_transform(data)

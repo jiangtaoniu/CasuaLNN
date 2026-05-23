@@ -1,5 +1,5 @@
 # Copyright 2022 Mathias Lechner and Ramin Hasani
-# ... (版权信息保持不变) ...
+# <-- This component is required/retained -->
 try:
     import torch
 except:
@@ -109,7 +109,7 @@ class CfCCell(nn.Module):
         else:
             ff1 = self.ff1(x)
 
-        # <-- 这是第一个、也是必须的修正 -->
+        # <-- This component is required/retained -->
         if isinstance(ts, torch.Tensor) and ts.dim() == 1:
             ts = ts.unsqueeze(-1)
 

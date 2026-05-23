@@ -180,7 +180,7 @@ class CasuaLNN(nn.Module):
         return final_pred
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
-        if self.task_name in ['long_term_forecast', 'short_term_forecast']:
+        if self.task_name == 'long_term_forecast':
             dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
             return dec_out[:, -self.pred_len:, :]
         return None
