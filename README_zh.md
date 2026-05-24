@@ -34,7 +34,29 @@ pip install -r requirements.txt
 
 ### 2. 数据集准备
 
-在运行之前，确保你需要测试的数据集分别置于 `./dataset/ETT`, `./dataset/electricity`, `./dataset/traffic`, `./dataset/weather`, or `./dataset/PEMS` 对应的目录架构之下。
+**下载地址**：所有基准测试数据集均可从 [Google Drive](https://drive.usercontent.google.com/download?id=1NF7VEefXCmXuWNbnNe858WvQAkJ_7wuP&export=download&authuser=0) 下载。
+
+下载完成后，请将数据集文件解压并放置到项目根目录下的 `./dataset/` 目录中。期望的目录结构如下：
+
+```text
+CasuaLNN/
+└── dataset/
+    ├── ETT/
+    │   ├── ETTh1.csv
+    │   ├── ETTh2.csv
+    │   ├── ETTm1.csv
+    │   └── ETTm2.csv
+    ├── electricity/
+    │   └── electricity.csv
+    ├── traffic/
+    │   └── traffic.csv
+    ├── weather/
+    │   └── weather.csv
+    └── PEMS/
+        ├── PEMS03.npz
+        └── PEMS08.npz
+```
+
 
 ### 3. 一键运行实验
 
@@ -65,6 +87,15 @@ python -u run.py \
 - `--label_len`: 解码器开始计算任务前的真实观测标记长度
 - `--d_model` / `--d_ff`: 各个网络中间层的前馈隐藏维度
 - `--decomp_method`: 不同数值序列的分解方式的切换
+
+## 致谢
+
+感谢以下优秀的开源项目对本工作的启发和支持：
+
+  - [TimeMixer](https://github.com/kwuking/TimeMixer)
+  - [PatchTST](https://github.com/yuqinie98/PatchTST)
+  - [Time-Series-Library](https://github.com/thuml/Time-Series-Library)
+  - [ncps (Neural Circuit Policies)](https://github.com/mlech26l/ncps)
 
 ## 证书
 MIT License.

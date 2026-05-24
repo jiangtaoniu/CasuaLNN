@@ -34,7 +34,29 @@ pip install -r requirements.txt
 
 ### 2. Dataset Preparation
 
-Datasets should be placed into either `./dataset/ETT`, `./dataset/electricity`, `./dataset/traffic`, `./dataset/weather`, or `./dataset/PEMS` respectively before running the scripts. 
+**Download**: All benchmark datasets can be downloaded from [Google Drive](https://drive.usercontent.google.com/download?id=1NF7VEefXCmXuWNbnNe858WvQAkJ_7wuP&export=download&authuser=0).
+
+After downloading, extract and place the dataset files into the `./dataset/` directory at the project root. The expected directory structure is:
+
+```text
+CasuaLNN/
+└── dataset/
+    ├── ETT/
+    │   ├── ETTh1.csv
+    │   ├── ETTh2.csv
+    │   ├── ETTm1.csv
+    │   └── ETTm2.csv
+    ├── electricity/
+    │   └── electricity.csv
+    ├── traffic/
+    │   └── traffic.csv
+    ├── weather/
+    │   └── weather.csv
+    └── PEMS/
+        ├── PEMS03.npz
+        └── PEMS08.npz
+```
+
 
 ### 3. Running Experiments
 
@@ -65,6 +87,15 @@ Key configurable parameters within `run.py` include:
 - `--label_len`: Start token length of the decoder
 - `--d_model` / `--d_ff`: Dimension parameters for hidden states
 - `--decomp_method`: Choices of numerical series decomposition patterns
+
+## Acknowledgements
+
+We appreciate the following open-source works that inspired and supported this project:
+
+  - [TimeMixer](https://github.com/kwuking/TimeMixer)
+  - [PatchTST](https://github.com/yuqinie98/PatchTST)
+  - [Time-Series-Library](https://github.com/thuml/Time-Series-Library)
+  - [ncps (Neural Circuit Policies)](https://github.com/mlech26l/ncps)
 
 ## License
 MIT License.
